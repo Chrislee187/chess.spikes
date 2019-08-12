@@ -1,4 +1,6 @@
-﻿namespace chess.games.db.Entities
+﻿using System.ComponentModel.DataAnnotations;
+
+namespace chess.games.db.Entities
 {
     public class Game : DbEntity
     {
@@ -7,6 +9,7 @@
         public Player White { get; set; }
         public Player Black { get; set; }
 
+        [MaxLength(30)]
         public string Date { get; set; }
 
         public string Round { get; set; }

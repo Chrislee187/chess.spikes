@@ -34,8 +34,9 @@ namespace chess.web
             services.AddTransient<IPgnSerialisationService, PgnSerialisationService>();
 
 //            var dbFile = @"D:\Src\Chess\src\chess.web\bin\Debug\netcoreapp2.2\Database\ChessGames10000.db";
-            var dbFile = @"Database/ChessGames10000.db";
-            services.AddTransient((p) => new ChessGamesDbContext(dbFile));
+//            var dbFile = @"Database/ChessGames10000.db";
+//            services.AddTransient((p) => new ChessGamesDbContext(dbFile)); // SQLite
+            services.AddTransient((p) => new ChessGamesDbContext());  // Use hardcoded Local docker sql dev instance
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
