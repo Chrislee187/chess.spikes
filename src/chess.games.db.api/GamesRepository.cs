@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using chess.games.db.Entities;
 using Microsoft.EntityFrameworkCore;
@@ -8,83 +9,117 @@ namespace chess.games.db.api
 {
     public interface IGamesRepository
     {
-        bool Exists(PgnGame pgnGame);
-        (Game game, bool created) GetOrCreate(PgnGame pgnGame);
-        IEnumerable<Game> Select();
+        long TotalGames { get; }
+        int AddImportBatch(PgnGame[] games);
     }
 
     public class GamesRepository : IGamesRepository
     {
         private readonly ChessGamesDbContext _chessGamesDbContext;
+        private IDictionary<Type, IDictionary<string, object>> _childCache;
 
         public GamesRepository(ChessGamesDbContext chessGamesDbContext)
         {
             _chessGamesDbContext = chessGamesDbContext;
-
+            CacheChildren();
         }
 
-        public  bool Exists(PgnGame pgnGame) => _chessGamesDbContext.GamesWithIncludes()
-                .Any(game => PgnGameMatcher(pgnGame, game));
-
-        private Game FindExact(PgnGame pgnGame) => _chessGamesDbContext.GamesWithIncludes() 
-                .SingleOrDefault(game => PgnGameMatcher(pgnGame, game));
-
-        public (Game game, bool created) GetOrCreate(PgnGame pgnGame)
+        private void CacheChildren()
         {
-            var game = FindExact(pgnGame);
-
-            if (game != null) return (game, false);
-
-            var site = _chessGamesDbContext.GetOrCreate(
-                s1 => s1.Name.Equals(pgnGame.Site),
-                () => new Site {Name = pgnGame.Site});
-
-            var whitePlayer = _chessGamesDbContext.GetOrCreate(
-                s1 => s1.Name.Equals(pgnGame.White),
-                () => new Player { Name = pgnGame.White});
-
-            var blackPlayer = _chessGamesDbContext.GetOrCreate(
-                s1 => s1.Name.Equals(pgnGame.Black),
-                () => new Player { Name = pgnGame.Black });
-
-            var @event = _chessGamesDbContext.GetOrCreate(
-                s1 => s1.Name.Equals(pgnGame.Event),
-                () => new Event { Name = pgnGame.Event });
-
-            game = new Game
+            _chessGamesDbContext.RunWithExtendedTimeout(() =>
             {
-                Event = @event,
-                Black = blackPlayer,
-                Site = site,
-                White = whitePlayer,
-                Round = pgnGame.Round,
-                MoveText = SantiseMoveText(pgnGame),
-                Date = pgnGame.Date.ToString(),
-                //                Result = pgnGame.Result // TODO: Mappers
-            };
-            _chessGamesDbContext.Games.Add(game);
-            _chessGamesDbContext.SaveChanges();
-            return (game, true);
+                _childCache = new Dictionary<Type, IDictionary<string, object>>
+                {
+                    {
+                        typeof(Event), _chessGamesDbContext.Events.ToList()
+                            .GroupBy(k => NormaliseName(k.Name), (k, g) => g.First())
+                            .ToDictionary(k => NormaliseName(k.Name), v => (object) v)
+                    },
+                    {
+                        typeof(Site), _chessGamesDbContext.Sites.ToList()
+                            .GroupBy(k => NormaliseName(k.Name), (k, g) => g.First())
+                            .ToDictionary(k => NormaliseName(k.Name), v => (object) v)
+                    },
+                    {
+                        typeof(Player), _chessGamesDbContext.Players.ToList()
+                            .GroupBy(k => NormaliseName(k.Name), (k, g) => g.First())
+                            .ToDictionary(k => NormaliseName(k.Name), v => (object) v)
+                    },
+                };
+
+            }, TimeSpan.FromMinutes(5));
         }
 
-        public  IEnumerable<Game> Select() => _chessGamesDbContext.GamesWithIncludes();
+        public long TotalGames => _chessGamesDbContext.Games.Count();
 
-        private bool PgnGameMatcher(PgnGame pgnGame, Game game)
+        public int AddImportBatch(PgnGame[] games)
         {
-            var santisedMoveText = SantiseMoveText(pgnGame);
+            int created = 0;
+            _chessGamesDbContext.RunWithExtendedTimeout(() =>
+            {
+                _chessGamesDbContext.Database.ExecuteSqlCommand("TRUNCATE TABLE [GameImports]");
 
-            return game.Black.Name.Equals(pgnGame.Black)
-                   && game.White.Name.Equals(pgnGame.White)
-                   && game.Event.Name.Equals(pgnGame.Event)
-                   && game.Site.Name.Equals(pgnGame.Site)
-                   && game.Round.Equals(pgnGame.Round)
-                   && game.MoveText.Equals(santisedMoveText)
-                   && game.Date.Equals(pgnGame.Date.ToString())
-                //                Result = pgnGame.Result    // TODO: Mappers
-                ;
+                games.ToList().ForEach(pgnGame =>
+                {
+                    var site = GetOrCreateCachedEntity<Site>(pgnGame.Site);
+                    var whitePlayer = GetOrCreateCachedEntity<Player>(pgnGame.White);
+                    var blackPlayer = GetOrCreateCachedEntity<Player>(pgnGame.Black);
+                    var @event = GetOrCreateCachedEntity<Event>(pgnGame.Event);
+
+                    var game = new GameImport
+                    {
+                        Event = @event,
+                        Black = blackPlayer,
+                        Site = site,
+                        White = whitePlayer,
+                        Round = pgnGame.Round,
+                        MoveText = NormaliseMoveText(pgnGame),
+                        Date = pgnGame.Date.ToString(),
+//                        Result = pgnGame.Result // TODO: Mappers
+                    };
+                    _chessGamesDbContext.GameImports.Attach(game);
+                });
+                _chessGamesDbContext.SaveChanges();
+
+                var sql = MergeNewGamesSql;
+                created = _chessGamesDbContext.Database.ExecuteSqlCommand(sql);
+            }, TimeSpan.FromMinutes(5));
+            return created;
         }
 
-        private static string SantiseMoveText(PgnGame pgnGame)
+        private static string  MergeNewGamesSql = 
+            "INSERT Games (Id, EventId, SiteId, WhiteId, BlackId, Date, [Round], Result, MoveText) " +
+            "SELECT Id, EventId, SiteId, WhiteId, BlackId, Date, [Round], Result, MoveText " +
+            "FROM GameImports imp " +
+            "WHERE NOT EXISTS (SELECT " +
+            "EventId, SiteId, WhiteId, BlackId, Date, [Round], Result, MoveText " +
+            "FROM Games g2 WHERE " +
+            "g2.EventId = imp.EventId " +
+            "AND g2.SiteId = imp.SiteId " +
+            "AND g2.WhiteId = imp.WhiteId " +
+            "AND g2.BlackId = imp.BlackId " +
+            "AND g2.Date = imp.Date " +
+            "AND g2.[Round] = imp.[Round] " +
+            "AND g2.Result = imp.Result " +
+            "AND g2.MoveText = imp.MoveText " +
+            ")";
+
+        private T GetOrCreateCachedEntity<T>(string name) where T : class, IHaveAName
+        {
+            var cache = _childCache[typeof(T)];
+            var normaliseName = NormaliseName(name);
+            if (!cache.TryGetValue(normaliseName, out var entity))
+            {
+                var instance = Activator.CreateInstance<T>();
+                instance.Name = name;
+                cache.Add(normaliseName, instance);
+                entity = instance;
+            }
+
+            return (T)entity;
+
+        }
+        private static string NormaliseMoveText(PgnGame pgnGame)
         {
             return pgnGame.MoveText
                 .Replace("\n", " ")
@@ -93,5 +128,10 @@ namespace chess.games.db.api
                 .Replace("{ ", "{")
                 .Replace(" }", "}");
         }
+        private static string NormaliseName(string name) =>
+            name.ToLower()
+                .Replace("-", " ")
+                .Replace(".", " ");
+
     }
 }

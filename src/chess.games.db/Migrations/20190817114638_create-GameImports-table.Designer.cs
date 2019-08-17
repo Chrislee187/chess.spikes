@@ -3,15 +3,17 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using chess.games.db.Entities;
 
 namespace chess.games.db.Migrations
 {
     [DbContext(typeof(ChessGamesDbContext))]
-    partial class ChessGamesDbContextModelSnapshot : ModelSnapshot
+    [Migration("20190817114638_create-GameImports-table")]
+    partial class createGameImportstable
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
